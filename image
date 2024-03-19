@@ -1,0 +1,203 @@
+#!/bin/bash
+
+#set -x
+
+
+# docker version -f '{{.Server.Experimental}}'
+# false
+
+# curl -I --trace-ascii -X GET --header 'PRIVATE-TOKEN: ' -G https://git.eadem.com/jwt/auth -d service=container_registry -d scope=repository:alex/qbo-ctl/node:pull
+# HTTP/1.1 200 OK
+# Server: nginx/1.16.1
+# Date: Wed, 19 May 2021 07:08:38 GMT
+# Content-Type: application/json; charset=utf-8
+# Connection: keep-alive
+# Vary: Accept-Encoding
+# Cache-Control: max-age=0, private, must-revalidate
+# Etag: W/"0896edbfa37d04b34af211368edc39b8"
+# Referrer-Policy: strict-origin-when-cross-origin
+# Set-Cookie: experimentation_subject_id=eyJfcmFpbHMiOnsibWVzc2FnZSI6IklqRXlZalZpWkdZeUxUUmxPRFF0TkdNd05TMWhZVFkwTFRVNFpXWTFNakZoTWpneE1pST0iLCJleHAiOm51bGwsInB1ciI6ImNvb2tpZS5leHBlcmltZW50YXRpb25fc3ViamVjdF9pZCJ9fQ%3D%3D--eb2722caf10ab0faac3382937aad6219cade468f; domain=.eadem.com; path=/; expires=Sun, 19 May 2041 07:08:38 -0000; secure; HttpOnly; SameSite=None
+# X-Content-Type-Options: nosniff
+# X-Download-Options: noopen
+# X-Frame-Options: DENY
+# X-Permitted-Cross-Domain-Policies: none
+# X-Request-Id: 5gBIonqCFx6
+# X-Runtime: 0.043300
+# X-Ua-Compatible: IE=edge
+# X-Xss-Protection: 1; mode=block
+# Strict-Transport-Security: max-age=31536000
+# Referrer-Policy: strict-origin-when-cross-origin
+
+### 
+
+BASE_IMG="kindest/base:latest"
+#BASE_IMG="kindest/base:v20210513-515fb3ae"
+
+exit_on_error() {
+    exit_code=$1
+    last_command=${@:2}
+    if [ $exit_code -ne 0 ]; then
+        >&2 echo "\"${last_command}\" command failed with exit code ${exit_code}."
+        exit $exit_code
+    fi
+}
+
+
+usage() {
+
+echo "$0 list k8s                          - list all remote tags"
+#echo "$0 list registry {gitlab|github}     - list qbo nodes tags in registry"
+echo "$0 list registry                     - list qbo nodes tags in registry"
+echo "$0 last {tag}                        - get lastest tags from https://github.com/kubernetes/kubernetes.git (default v1.18.19)"
+echo "$0 build base                        - build base image"
+#echo "$0 build node {tag} {gitlab|github}  - build node image"
+echo "$0 build node {tag}                  - build node image"
+    exit 1
+
+}
+
+if [ -z $1 ]; then 
+
+usage
+
+fi
+
+if [ $1 = "list" ]; then
+    if [ -z $2 ]; then
+        usage
+    fi
+    if [ $2 = "k8s" ]; then
+        # get all tags from https://github.com/kubernetes/kubernetes.git remote
+        git ls-remote --tags -t --refs --sort=-v:refname https://github.com/kubernetes/kubernetes.git | more
+    elif [ $2 = "registry" ]; then
+
+        # if [ -z $3 ]; then
+        #     usage
+        # fi
+
+        # if [ $3 = "gitlab" ]; then
+            ### GITLAB ###
+            REGISTRY=registry.eadem.com
+            API=git.eadem.com
+            OWNER=alex
+            REPO=qbo-ctl
+
+            CI_PROJECT_PATH="alex/qbo-ctl/node"
+            AUTHURL=https://$API
+            URL=https://$REGISTRY
+
+            #https://auth.docker.io/token?service=registry.docker.io&scope=repository:samalba/my-app:pull,push
+
+            #https://auth.docker.io/token?service=container_registry&scope="repository:alex/qbo-ctl/node:pull"
+
+            #service=container_registry&scope="repository:alex/qbo-ctl/node:pull"
+            #service%3Dcontainer_registry%26scope%3D%22repository%3Aalex%2Fqbo-ctl%2Fnode%3Apull%22
+            #service%3Dcontainer_registry%26scope%3D%22repository%3A%s%3Apull%%22
+            #service%3Dcontainer_registry%%26scope%%3D%%22repository%%3A%s%%3Apull%%22
+
+            service=container_registry&scope="repository:s:pull"
+
+            TOKEN=$(curl --silent --header "PRIVATE-TOKEN: " \
+                -G ${AUTHURL}/jwt/auth \
+                -d service=container_registry \
+                -d scope="repository:${CI_PROJECT_PATH}:pull" \
+                | jq -r '.token')
+
+            #echo $TOKEN
+            BEARER="Authorization:Bearer $TOKEN"
+
+            echo "${URL}/v2/$CI_PROJECT_PATH/tags/list"
+
+            REGISTRY_TAG_LIST=$(curl --silent --header "$BEARER" ${URL}/v2/$CI_PROJECT_PATH/tags/list)
+            echo $REGISTRY_TAG_LIST
+        # elif [ $3 = "github" ]; then
+        #     ### GITHUB ###
+        #     TOKEN=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
+        #     USERNAME=alexeadem
+        #     PACKAGE_TYPE=docker
+        #     PACKAGE_NAME=node
+        #     # REPO=qbo-ctl
+        #     curl --silent -H "Authorization: token $TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/users/$USERNAME/packages/$PACKAGE_TYPE/$PACKAGE_NAME/versions | jq '.[].metadata.docker.tags'
+        # else    
+        #     usage   
+    #     fi
+    # else
+    #     usage
+    fi
+
+elif [ $1 = "last" ]; then
+    if [ -z $2 ]; then
+        usage
+    fi
+    # get lastest tag from version
+    git ls-remote --tags -t --refs --sort=-v:refname https://github.com/kubernetes/kubernetes.git  | grep -v "\-[a-Z]" | cut -f3 -d'/' | grep $2 | head -1
+elif [ $1 = "build" ]; then
+    if [ -z $2 ]; then
+        usage
+    fi
+
+    if [ $2 = "base" ]; then
+        cd ~/git/kind/
+        TAG=latest make -C images/base quick
+        exit_on_error $?
+
+        exit 0
+
+    elif [ $2 = "node" ]; then
+        #git checkout tags/$1 -f
+
+        if [ -z $3 ]; then
+            usage
+        fi
+
+        # checkout tag
+        cd ~/git/kubernetes
+        git fetch
+        git checkout tags/$3
+        exit_on_error $?
+
+        TAG=$(git describe --tags)
+        # build kubenetes
+
+        # build/run.sh make
+        # ls ./_output/dockerized/bin/linux/amd64/
+
+
+        # if [ -z $4 ]; then
+        #     usage
+        # fi
+
+        # if [ $4 = "gitlab" ]; then
+            ### GITLAB ###
+            REGISTRY=registry.eadem.com
+            #API=git.eadem.com
+            OWNER=alex
+            REPO=qbo-ctl
+
+        # elif [ $4 = "github" ]; then
+        #     ### GITHUB ###
+        #     REGISTRY=docker.pkg.github.com
+        #     OWNER=alexeadem
+        #     REPO=qbo-ctl
+        # else
+        #     usage
+        # fi
+
+        cd ~/git/kind/
+        ./bin/kind build node-image --kube-root ~/git/kubernetes --base-image ${BASE_IMG} --image $REGISTRY/$OWNER/$REPO/node:${TAG}
+        docker image push $REGISTRY/$OWNER/$REPO/node:${TAG}
+
+        # github auth
+        # cat ~/git/mtl/github.txt | docker login https://docker.pkg.github.com -u alexeadem --password-stdin
+        exit 0
+
+
+    else
+        usage
+    fi
+
+
+else
+    usage
+    
+fi

@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# set -e
+
+EXITCODE=0
+
+# bits of this were adapted from lxc-checkconfig
+# see also https://github.com/lxc/lxc/blob/lxc-1.0.2/src/lxc/lxc-checkconfig.in
+
+possibleConfigs=(
+	'/proc/config.gz'
+	"/boot/config-$(uname -r)"
+	"/usr/src/linux-$(uname -r)/.config"
+	'/usr/src/linux/.config'
+)
+
+if [ $# -gt 0 ]; then
+	CONFIG="$1"
+else
+	: "${CONFIG:="${possibleConfigs[0]}"}"
+fi
+
+if ! command -v zgrep &> /dev/null; then
+	zgrep() {
+		zcat "$2" | grep "$1"
+	}
+fi
+
+kernelVersion="$(uname -r)"
+kernelMajor="${kernelVersion%%.*}"
+kernelMinor="${kernelVersion#$kernelMajor.}"
+kernelMinor="${kernelMinor%%.*}"
+
+is_set() {
+	zgrep "CONFIG_$1=[y|m]" "$CONFIG" > /dev/null
+}
+is_set_in_kernel() {
+	zgrep "CONFIG_$1=y" "$CONFIG" > /dev/null
+}
+is_set_as_module() {
+	zgrep "CONFIG_$1=m" "$CONFIG" > /dev/null
+}
+
+color() {
+	local codes=()
+	if [ "$1" = 'bold' ]; then
+		codes=("${codes[@]}" '1')
+		shift
+	fi
+	if [ "$#" -gt 0 ]; then
+		local code=
+		case "$1" in
+			# see https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
+			black) code=30 ;;
+			red) code=31 ;;
+			green) code=32 ;;
+			yellow) code=33 ;;
+			blue) code=34 ;;
+			magenta) code=35 ;;
+			cyan) code=36 ;;
+			white) code=37 ;;
+		esac
+		if [ "$code" ]; then
+			codes=("${codes[@]}" "$code")
+		fi
+	fi
+	local IFS=';'
+	echo -en '\033['"${codes[*]}"'m'
+}
+wrap_color() {
+	text="$1"
+	shift
+	color "$@"
+	echo -n "$text"
+	color reset
+	echo
+}
+
+wrap_good() {
+	echo "$(wrap_color "$1" bold): $(wrap_color "$2" green)"
+}
+wrap_bad() {
+	echo "$(wrap_color "$1" bold): $(wrap_color "$2" bold red)"
+}
+wrap_warning() {
+	wrap_color >&2 "$*" red
+}
+
+check_flag() {
+	if is_set_in_kernel "$1"; then
+		wrap_good "CONFIG_$1" 'enabled'
+	elif is_set_as_module "$1"; then
+		wrap_good "CONFIG_$1" 'enabled (as module)'
+	else
+		wrap_bad "CONFIG_$1" 'missing'
+		EXITCODE=1
+	fi
+}
+
+check_flags() {
+	for flag in "$@"; do
+		echo -n "- "
+		check_flag "$flag"
+	done
+}
+
+check_command() {
+	if command -v "$1" > /dev/null 2>&1; then
+		wrap_good "$1 command" 'available'
+	else
+		wrap_bad "$1 command" 'missing'
+		EXITCODE=1
+	fi
+}
+
+check_device() {
+	if [ -c "$1" ]; then
+		wrap_good "$1" 'present'
+	else
+		wrap_bad "$1" 'missing'
+		EXITCODE=1
+	fi
+}
+
+check_distro_userns() {
+	source /etc/os-release 2> /dev/null || /bin/true
+	if [[ "${ID}" =~ ^(centos|rhel)$ && "${VERSION_ID}" =~ ^7 ]]; then
+		# this is a CentOS7 or RHEL7 system
+		grep -q "user_namespace.enable=1" /proc/cmdline || {
+			# no user namespace support enabled
+			wrap_bad "  (RHEL7/CentOS7" "User namespaces disabled; add 'user_namespace.enable=1' to boot command line)"
+			EXITCODE=1
+		}
+	fi
+}
+
+run_linux_tests() {
+
+    if [ ! -e "$CONFIG" ]; then
+        # wrap_warning "warning: $CONFIG does not exist, searching other paths for kernel config ..."
+        for tryConfig in "${possibleConfigs[@]}"; do
+            if [ -e "$tryConfig" ]; then
+                CONFIG="$tryConfig"
+                break
+            fi
+        done
+        if [ ! -e "$CONFIG" ]; then
+            wrap_warning "error: cannot find kernel config"
+            wrap_warning "  try running this script again, specifying the kernel config:"
+            wrap_warning "    CONFIG=/path/to/kernel/.config $0 or $0 /path/to/kernel/.config"
+            # exit 1
+        fi
+    fi
+
+    wrap_color "info: reading kernel config from $CONFIG ..." white
+    echo
+
+    # echo 'Generally Necessary:'
+	echo -n '- '
+	check_cgroup() {
+    
+		cgroupSubsystemDir="$(awk '/[, ](cpu|cpuacct|cpuset|devices|freezer|memory)[, ]/ && $3 == "cgroup" { print $2 }' /proc/mounts | head -n1)"
+		cgroupDir="$(dirname "$cgroupSubsystemDir")"
+		cgroup_v=$(stat -fc %T /sys/fs/cgroup/)
+		if [ -d "$cgroupDir/cpu" ] || [ -d "$cgroupDir/cpuacct" ] || [ -d "$cgroupDir/cpuset" ] || [ -d "$cgroupDir/devices" ] || [ -d "$cgroupDir/freezer" ] || [ -d "$cgroupDir/memory" ]; then
+			# echo "$(wrap_good 'cgroup hierarchy' 'properly mounted') [$cgroupDir]"
+			# echo $cgroup_v
+			wrap_bad "cgroup hierarchy" "$cgroup_v"
+			# exit 1
+		else
+			# echo $cgroup_v
+			wrap_good "cgroup hierarchy" "$cgroup_v"
+
+			# if [ "$cgroupSubsystemDir" ]; then
+			#     echo "$(wrap_bad 'cgroup hierarchy' 'single mountpoint!') [$cgroupSubsystemDir]"
+			# else
+			#     wrap_bad 'cgroup hierarchy' 'nonexistent??'
+			#     echo 'Set `systemd.unified_cgroup_hierarchy=0"` to run kubernetes verisons earlier than `v1.24.0`' 
+			#     # read -n 1 -s -r -p "<Press any key to continue>"
+				
+
+			# fi
+			# EXITCODE=1
+			# 
+		fi
+	}
+
+
+    check_limit_under__max_user_watches() {
+        if [ "$(cat "$1")" -lt "$2" ]; then
+            wrap_warning "- $1" "$(cat "$1")"   
+            echo "sudo sysctl fs.inotify.max_user_watches=2147483647"
+            # read -n 1 -s -r -p "<Press any key to run command>"
+            # sudo sysctl fs.inotify.max_user_watches=2147483647
+        else
+            wrap_good "- $1" "$(cat "$1")"
+        fi
+    }
+
+    check_limit_under__max_user_instances() {
+        if [ "$(cat "$1")" -lt "$2" ]; then
+            wrap_warning "- $1" "$(cat "$1")"
+            # echo "Set to $2 to run more nodes"
+            echo "sudo sysctl fs.inotify.max_user_instances=2048" 
+            # read -n 1 -s -r -p "<Press any key to continue cmd>"
+            # sudo sysctl fs.inotify.max_user_instances=2048
+
+        else
+            wrap_good "- $1" "$(cat "$1")"
+        fi
+    }
+
+     check_limit_under__max_queued_events() {
+        if [ "$(cat "$1")" -lt "$2" ]; then
+            wrap_warning "- $1" "$(cat "$1")"
+            # echo "Set to $2 to run more nodes"
+            echo "sudo sysctl fs.inotify.max_queued_events=2147483647" 
+            # read -n 1 -s -r -p "<Press any key to continue cmd>"
+            # sudo sysctl fs.inotify.max_queued_events=2147483647
+
+        else
+            wrap_good "- $1" "$(cat "$1")"
+        fi
+    }
+
+
+    # SE linux
+    check_selinux() {
+        if [ -f "/etc/selinux/config" ]; then
+            # sestatus
+            status=$(sestatus  | awk '{print $3}')
+            # echo $status
+            if [ "$status" != "disabled" ] && [ "$status" != "permissive" ] ; then
+                wrap_color "  SELinux should be disabled or in permissive mode, for example set: setenforce 0" bold red
+                exit 1
+            fi
+
+			wrap_good "- $1" "$status"
+
+        fi
+
+    }
+
+    # if [ ! `head -c 3 /sys/hypervisor/uuid` == "ec2" ]; then
+    # 	echo 'SELinux:'
+   
+    # fi
+
+
+	check_firewalld() {
+		status=$(systemctl is-active firewalld)
+		# status=$(firewall-cmd --state)
+		# echo $status
+		# status="test"
+
+
+		if [ "$status" != "inactive" ] ; then
+			wrap_bad "- $1" "$status"
+			wrap_color "  firewalld should be disabled. Run: sudo systemctl stop firewalld; sudo systemctl disable firewalld" bold red
+			exit 1
+		fi
+
+		wrap_good "- $1" "$status"
+
+
+	}
+
+	check_distro() {
+		source /etc/os-release 2> /dev/null || /bin/true
+		if [[ ! "${ID}" =~ ^($2)$ && ! "${VERSION_ID}" =~ ^38 ]]; then
+			# This is not a Fedora System
+			
+			wrap_bad "- ${1}" "$ID"
+			exit 1
+		
+		fi
+
+		wrap_good "- $1" "${ID} ${VERSION_ID}"
+	}
+
+	vercomp () {
+		if [[ $1 == $2 ]]
+		then
+			return 0
+		fi
+		local IFS=.
+		local i ver1=($1) ver2=($2)
+		# fill empty fields in ver1 with zeros
+		for ((i=${#ver1[@]}; i<${#ver2[@]}; i++))
+		do
+			ver1[i]=0
+		done
+		for ((i=0; i<${#ver1[@]}; i++))
+		do
+			if [[ -z ${ver2[i]} ]]
+			then
+				# fill empty fields in ver2 with zeros
+				ver2[i]=0
+			fi
+			if ((10#${ver1[i]} > 10#${ver2[i]}))
+			then
+				return 1
+			fi
+			if ((10#${ver1[i]} < 10#${ver2[i]}))
+			then
+				return 2
+			fi
+		done
+		return 0
+	}
+
+	check_docker() {
+
+		version=$(docker version --format '{{.Client.APIVersion}}')
+
+		vercomp $version $2
+		if [ $? != 0 ]; then
+			
+			wrap_bad "- Docker" "$version"
+			exit 1
+		
+		fi
+
+		wrap_good "- Docker" "$version"
+
+	}
+
+	check_cgroup
+    check_limit_under__max_user_watches /proc/sys/fs/inotify/max_user_watches 2147483647
+    check_limit_under__max_user_instances /proc/sys/fs/inotify/max_user_instances 2048
+    check_limit_under__max_queued_events /proc/sys/fs/inotify/max_queued_events 2147483647
+	check_selinux selinux enabled
+	check_firewalld firewalld enabled
+	#check_distro OS Fedora
+	check_docker version 1.43
+
+
+}
+
+machine=Linux
+
+o="$(uname -s)"
+case "${o}" in
+    Linux*) 
+            
+    machine=Linux;;
+    Darwin*)  
+    machine=Mac;;
+    *)          
+    machine="UNKNOWN:${o}"
+esac
+
+ if [ $machine = "Linux" ]; then
+	echo "OS = $machine"
+	run_linux_tests
+fi
+
+
+exit $EXITCODE
